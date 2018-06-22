@@ -18,7 +18,7 @@
 		if ( isset( $assoc_args['skip-not-found'] ) ) {
 			$this->skip_not_found_users = true;
 		}
-		// $this->obfuscate_users();
+		$this->obfuscate_users();
 		$this->obfuscate_comments();
 	}
 
@@ -40,7 +40,7 @@
 			$commentarr['comment_agent']        = $faker->userAgent;
 			wp_update_comment( $commentarr );
 		}
-		WP_CLI::success( count( $comments ) . __( ' comments obfuscated.' ) );
+		WP_CLI::success( count( $comments ) . __( ' comments obfuscated.', 'gdpr-sanitizer' ) );
 	}
 	
 	protected function obfuscate_users() {
