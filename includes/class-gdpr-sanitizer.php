@@ -85,8 +85,14 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 		$users_updated    = $this->obfuscate_users();
 		$comments_updated = $this->obfuscate_comments();
 		$items            = array(
-			'Users'    => $users_updated,
-			'Comments' => $comments_updated,
+			array(
+				'Updated' => 'Users',
+				'Count'   => $users_updated,
+			),
+			array(
+				'Updated' => 'Comments',
+				'Count'   => $comments_updated,
+			),
 		);
 		WP_CLI\Utils\format_items( 'table', $items, array( 'Updated', 'Count' ) );
 		if ( count( $this->excluded_user_ids ) > 0 ) {
@@ -146,7 +152,7 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 		$progress = \WP_CLI\Utils\make_progress_bar( 'Rewriting comments...', $count );
 		foreach ( $all_comments as $blog_id => $comments ) {
 			foreach ( $comments as $comment ) {
-				if ( 'single_site' !== $blog_id ) {
+				if ( 'single_site' !== $blog_id && is_multisite() ) {
 					switch_to_blog( $blog_id );
 				}
 				$commentarr                         = $comment->to_array();
@@ -181,7 +187,9 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 				 */
 				do_action( 'gdpr_sanitizer_post_update_comment', $comment, $commentarr, $faker );
 				$progress->tick();
-				restore_current_blog();
+				if ( is_multisite() ) {
+					restore_current_blog();
+				}
 			}
 		}
 		$progress->finish();
@@ -196,14 +204,16 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 	 * @return array
 	 */
 	protected function gather_comments( $blog_id ) {
-		if ( is_int( $blog_id ) ) {
+		if ( is_int( $blog_id ) && is_multisite() ) {
 			switch_to_blog( $blog_id );
 		}
 		$trash_comments   = get_comments( array( 'status' => 'trash' ) );
 		$spam_comments    = get_comments( array( 'status' => 'spam' ) );
 		$regular_comments = get_comments();
 
-		restore_current_blog();
+		if ( is_multisite() ) {
+			restore_current_blog();
+		}
 
 		return array_merge( $regular_comments, $trash_comments, $spam_comments );
 	}
@@ -378,7 +388,7 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 			return (int) $string;
 		}
 		if ( stristr( $string, '@' ) ) {
-			$user = get_user_by( 'email', $string );
+			$user = ( is_multisite() ) ? get_user_by( 'email', $string ) : $this->ms_get_user_by( 'email', $string );
 			if ( $user ) {
 				return $user->ID;
 			} else {
@@ -389,7 +399,7 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 				}
 			}
 		}
-		$user = get_user_by( 'username', $string );
+		$user = ( is_multisite() ) ? get_user_by( 'login', $string ) : $this->ms_get_user_by( 'login', $string );
 		if ( $user ) {
 			return $user->ID;
 		}
@@ -399,6 +409,35 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 			WP_CLI::error( 'username to keep not found' );
 		}
 
+		return false;
+	}
+
+	/**
+	 * Get a user by field for multisite.
+	 *
+	 * @param string $field field name.
+	 * @param string $string string to search by.
+	 */
+	protected function ms_get_user_by( $field, $string ) {
+		global $wpdb;
+		if ( 'login' === $field ) {
+			$user_id = $wpdb->get_var( $wpdb->prepare(
+				"SELECT ID FROM $wpdb->users WHERE `user_login` = %s LIMIT 1",
+				$string
+			) );
+		} elseif ( 'email' ) {
+			$user_id = $wpdb->get_var( $wpdb->prepare(
+				"SELECT ID FROM $wpdb->users WHERE `user_email` = %s LIMIT 1",
+				$string
+			) );
+		} else {
+			WP_CLI::error( 'Unrecognized user search field.' );
+		}
+		if ( ! empty( $user_id ) ) {
+			$user     = new stdClass();
+			$user->ID = $user_id;
+			return $user;
+		}
 		return false;
 	}
 }
