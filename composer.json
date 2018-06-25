@@ -1,20 +1,30 @@
 {
     "name": "nullvariable/gdpr-sanitizer",
-    "description": "",
+    "description": "Rewrites personally identifying information (PII) in user profiles and comments.",
     "type": "wp-cli-package",
-    "homepage": "https://github.com/nullvariable/gdpr-sanitizer",
+    "homepage": "https://github.com/nullvariable/wpcli-gdpr-sanitizer",
     "license": "MIT",
-    "authors": [],
+    "authors": [
+        {
+            "name": "Doug Cone",
+            "homepage": "https://dougcone.com"
+        }
+    ],
     "minimum-stability": "dev",
     "prefer-stable": true,
     "autoload": {
         "files": [ "gdpr-sanitizer.php" ]
     },
     "require": {
-        "wp-cli/wp-cli": "^1.1.0",
-        "fzaninotto/faker": "^1.7"
+        "php": "7.*",
+        "fzaninotto/faker": "^1.7",
+        "wp-cli/wp-cli": "^1.1.0"
     },
     "require-dev": {
-        "behat/behat": "~2.5"
+        "behat/behat": "~2.5",
+        "squizlabs/php_codesniffer": "^2.2 || ^3.0.2",
+        "dealerdirect/phpcodesniffer-composer-installer": "^0.4.4",
+        "wimg/php-compatibility": "*",
+        "wp-coding-standards/wpcs": "^0.14.1"
     }
 }

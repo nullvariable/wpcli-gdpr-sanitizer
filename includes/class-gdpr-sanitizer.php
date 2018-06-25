@@ -3,6 +3,8 @@
 use Faker\Factory;
 
 /**
+ * Rewrites personally identifying information (PII) in user profiles and comments.
+ *
  * @package nullvariable\wpcli-gdpr-sanitizer
  */
 class GDPR_Sanitizer extends \WP_CLI_Command {
@@ -11,7 +13,7 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 	 *
 	 * @var array
 	 */
-	protected $excluded_user_ids = [];
+	protected $excluded_user_ids = array();
 	/**
 	 * If we can't find a user id for a name or email, should we bail?
 	 *
@@ -32,14 +34,10 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 	 *     wp gdpr-sanitizer
 	 *     wp gdpr-sanitizer --keep=123
 	 *     wp gdpr-sanitizer --keep="123,admin,test@example.com"
-	 *
-	 * @param $args array arguments.
-	 * @param $assoc_args array associative array of arguments.
-	 * @throws WP_CLI\ExitException
 	 */
 	public function __invoke( $args, $assoc_args ) {
 		if ( ! empty( $args ) ) {
-			WP_CLI::warning( __( 'unknown argument', 'gdpr-sanitizer' ) );
+			WP_CLI::warning( 'unknown argument' );
 		}
 		if ( isset( $assoc_args['keep'] ) && ! empty( $assoc_args['keep'] ) ) {
 			$this->set_excluded_user_ids( $assoc_args['keep'] );
@@ -47,6 +45,8 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 		if ( isset( $assoc_args['skip-not-found'] ) ) {
 			$this->skip_not_found_users = true;
 		}
+
+		WP_CLI::confirm( 'Rewrite all user data?', $assoc_args );
 		$this->obfuscate_users();
 		$this->obfuscate_comments();
 	}
@@ -54,18 +54,18 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 	/**
 	 * Rewrite the PII found in standard WordPress comments.
 	 *
-	 * @return void
+	 * @return integer Number of comments updated.
 	 */
 	protected function obfuscate_comments() {
 		$faker = Factory::create();
 
-		$trash_comments   = get_comments( [ 'status' => 'trash', ] );
-		$spam_comments    = get_comments( [ 'status' => 'spam' ] );
+		$trash_comments   = get_comments( array( 'status' => 'trash' ) );
+		$spam_comments    = get_comments( array( 'status' => 'spam' ) );
 		$regular_comments = get_comments();
 		$comments         = array_merge( $regular_comments, $trash_comments, $spam_comments );
 
 		$count    = count( $comments );
-		$progress = \WP_CLI\Utils\make_progress_bar( __( 'Obfuscating comments', 'gdpr' ), $count );
+		$progress = \WP_CLI\Utils\make_progress_bar( 'Obfuscating comments...', $count );
 
 		foreach ( $comments as $comment ) {
 			$commentarr                         = $comment->to_array();
@@ -102,64 +102,66 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 			$progress->tick();
 		}
 		$progress->finish();
-		WP_CLI::success( count( $comments ) . __( ' comments obfuscated.', 'gdpr-sanitizer' ) );
+		return $count;
 	}
 
 	/**
 	 * Loop over all the users found and replace their personal data.
 	 *
-	 * @throws WP_CLI\ExitException
-	 * @return void
+	 * @return integer Number of users updated.
 	 */
 	protected function obfuscate_users() {
-		$users = [];
-		if ( is_multisite() ) { //@TODO check global --url param to allow for operating on a single site
+		$users = array();
+		if ( is_multisite() ) { // @TODO check global --url param to allow for operating on a single site
 			$site_ids = get_sites();
 			foreach ( $site_ids as $site_id ) {
-				$site_users = get_users( [
-					'blog_id' => $site_id,
-					'exclude' => $this->excluded_user_ids,
-				] );
+				$site_users = get_users(
+					array(
+						'blog_id' => $site_id,
+						'exclude' => $this->excluded_user_ids,
+					)
+				);
 				$users      = array_merge( $users, $site_users );
 			}
 		} else {
-			$users = get_users( [
-				'exclude' => $this->excluded_user_ids,
-			] );
+			$users = get_users(
+				array(
+					'exclude' => $this->excluded_user_ids,
+				)
+			);
 		}
 		if ( count( $users ) <= 0 ) {
-			WP_CLI::success( __( 'No users changed (did you exclude them all?)', 'gdpr-sanitizer' ) );
+			WP_CLI::success( 'No users changed (did you exclude them all?)' );
 
 			return;
 		}
 		$count    = count( $users );
-		$progress = \WP_CLI\Utils\make_progress_bar( __( 'Obfuscating users', 'gdpr' ), $count );
+		$progress = \WP_CLI\Utils\make_progress_bar( 'Obfuscating users...', $count );
 		foreach ( $users as $user ) {
 			$this->obfuscate_user( $user );
 			$progress->tick();
 		}
 		$progress->finish();
-		WP_CLI::success( $count . __( ' users obfuscated.', 'gdpr-sanitizer' ) );
+		return $count;
 	}
 
 	/**
 	 * Replace a single user's data.
 	 *
-	 * @param [type] $user
-	 * @throws WP_CLI\ExitException
+	 * @param WP_User $user WordPress user object.
 	 * @return void
 	 */
 	private function obfuscate_user( $user ) {
 		$faker         = Factory::create();
 		$original_user = $user;
-		$new_data      = [
+		$new_data      = array(
 			'user_pass'     => $faker->password,
 			'user_nicename' => $faker->name,
 			'user_email'    => $faker->safeEmail,
 			'user_url'      => $faker->url,
 			'display_name'  => $faker->firstName,
 			'user_login'    => $this->generate_unused_user_login(),
-		];
+		);
 		foreach ( $new_data as $key => $value ) {
 			$user->{$key} = $value;
 		}
@@ -195,7 +197,6 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 	/**
 	 * Return a fake login name that doesn't exist yet.
 	 *
-	 * @throws WP_CLI\ExitException
 	 * @return string
 	 */
 	private function generate_unused_user_login() {
@@ -207,7 +208,7 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 			$user                = get_user_by( 'user_login', $user_login_to_check );
 			if ( ! $user ) {
 				$new_user_login = $user_login_to_check;
-			} else if ( $sanity_check > 3 ) { // it would be crazy to get here, but lets try adding some random numbers.
+			} elseif ( $sanity_check > 3 ) { // it would be crazy to get here, but lets try adding some random numbers.
 				$user_login_to_check = $faker->numerify( $user_login_to_check . '#####' );
 				$user                = get_user_by( 'user_login', $user_login_to_check );
 				if ( ! $user ) {
@@ -217,7 +218,7 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 			$sanity_check ++;
 			// it should be impossible to get here.
 			if ( $sanity_check > 30 ) {
-				WP_CLI::error( __( 'Unable to find a fake username that was not already in use', 'gdpr-sanitizer' ) );
+				WP_CLI::error( 'Unable to find a fake username that was not already in use' );
 			}
 		}
 
@@ -225,28 +226,27 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 	}
 
 	/**
-	 * Wordpress does not update user names via the wp_update_user function, so we need to do that manually.
+	 * WordPress does not update user names via the wp_update_user function, so we need to do that manually.
 	 *
-	 * @param int $user_id
-	 * @param string $new_login
+	 * @param int    $user_id WP user id.
+	 * @param string $new_login New user login.
 	 *
 	 * @return void
 	 */
 	private function update_user_login( $user_id, $new_login ) {
 		global $wpdb;
-		$wpdb->update( $wpdb->users, [ 'user_login' => $new_login, ], [ 'ID' => $user_id, ] );
+		$wpdb->update( $wpdb->users, array( 'user_login' => $new_login ), array( 'ID' => $user_id ) );
 	}
 
 	/**
 	 * Process incoming --keep argument into excluded user ids array
 	 *
-	 * @param string $arg_string
+	 * @param string $arg_string The --keep argument value.
 	 *
-	 * @throws WP_CLI\ExitException
-	 * @return void
+	 * @return integer Number of user ids excluded.
 	 */
 	private function set_excluded_user_ids( $arg_string ) {
-		$excluded_user_ids = [];
+		$excluded_user_ids = array();
 		if ( stristr( $arg_string, ',' ) ) {
 			$strings = explode( ',', $arg_string );
 			foreach ( $strings as $string ) {
@@ -256,15 +256,15 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 			$excluded_user_ids[] = $this->string_to_user( $arg_string );
 		}
 		$this->excluded_user_ids = $excluded_user_ids;
+		return count( $this->excluded_user_ids );
 	}
 
 	/**
 	 * Returns a user id from an email, user login, or string id
 	 *
-	 * @param [type] $string
+	 * @param string $string A single segment of the --keep argument.
 	 *
-	 * @throws WP_CLI\ExitException
-	 * @return integer
+	 * @return integer|boolean User id or false if not found but skipping is ok.
 	 */
 	private function string_to_user( $string ) {
 		if ( is_numeric( $string ) ) {
@@ -276,9 +276,9 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 				return $user->ID;
 			} else {
 				if ( $this->skip_not_found_users ) {
-					WP_CLI::warning( __( 'user email not found', 'gdpr-sanitizer' ) );
+					WP_CLI::warning( 'user email not found' );
 				} else {
-					WP_CLI::error( __( 'user email not found', 'gdpr-sanitizer' ) );
+					WP_CLI::error( 'user email not found' );
 				}
 			}
 		}
@@ -287,9 +287,9 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 			return $user->ID;
 		}
 		if ( $this->skip_not_found_users ) {
-			WP_CLI::warning( __( 'username to keep not found, skipping', 'gdpr-sanitizer' ) );
+			WP_CLI::warning( 'username to keep not found, skipping' );
 		} else {
-			WP_CLI::error( __( 'username to keep not found', 'gdpr-sanitizer' ) );
+			WP_CLI::error( 'username to keep not found' );
 		}
 
 		return false;
