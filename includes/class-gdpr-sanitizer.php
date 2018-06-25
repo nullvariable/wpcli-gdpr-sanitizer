@@ -20,20 +20,44 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 	 * @var boolean
 	 */
 	protected $skip_not_found_users = false;
+	/**
+	 * Site id to restrict rewrite to.
+	 *
+	 * @var integer
+	 */
+	protected $limit_to_site = null;
 
 	/**
 	 * Performs personal information replacement.
 	 *
 	 * ## OPTIONS
 	 *
-	 * [--keep=<user id|user login|email>]
+	 * [--keep=<user_id|user_login|email>]
 	 * : user(s) to skip during replacement.
+	 *
+	 * [--skip-not-found]
+	 * : skip users to keep if not found, fails otherwise.
+	 *
+	 * [--site=<site_id>]
+	 * : site id to limit rewrites to.
 	 *
 	 * ## EXAMPLES
 	 *
-	 *     wp gdpr-sanitizer
-	 *     wp gdpr-sanitizer --keep=123
-	 *     wp gdpr-sanitizer --keep="123,admin,test@example.com"
+	 *     # Rewrite all user profiles and comments.
+	 *     $ wp gdpr-sanitizer
+	 *     Success: Rewrote all user data.
+	 *
+	 *     # Rewrite all user profiles except for user_id 123.
+	 *     $ wp gdpr-sanitizer --keep=1
+	 *     Success: All comments and users except: '1' rewritten.
+	 *
+	 *     # Rewrite all user profiles except ones matching user id 123, user login admin, and/or test@example.com and skip those if not found.
+	 *     $ wp gdpr-sanitizer --keep="2,admin,test@example.com" --skip-not-found
+	 *     Success: All comments and users except: '2,1,3' rewritten.
+	 *
+	 *     # Rewrite only comments and users for one site on a multi-site install.
+	 *     $ wp gdpr-sanitizer --site=3
+	 *     Success: All comments and users on site '3' rewritten.
 	 */
 	public function __invoke( $args, $assoc_args ) {
 		if ( ! empty( $args ) ) {
@@ -45,10 +69,44 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 		if ( isset( $assoc_args['skip-not-found'] ) ) {
 			$this->skip_not_found_users = true;
 		}
+		if ( isset( $assoc_args['site'] ) ) {
+			if ( ! is_multisite() ) {
+				WP_CLI::error( 'site parameter only valid on multi-site installs.' );
+			}
+			if ( is_numeric( $assoc_args['site'] ) ) {
+				$this->limit_to_site = (int) $assoc_args['site'];
+
+			} else {
+				WP_CLI::error( 'site must be a number' );
+			}
+		}
 
 		WP_CLI::confirm( 'Rewrite all user data?', $assoc_args );
-		$this->obfuscate_users();
-		$this->obfuscate_comments();
+		$users_updated    = $this->obfuscate_users();
+		$comments_updated = $this->obfuscate_comments();
+		$items            = array(
+			'Users'    => $users_updated,
+			'Comments' => $comments_updated,
+		);
+		WP_CLI\Utils\format_items( 'table', $items, array( 'Updated', 'Count' ) );
+		if ( count( $this->excluded_user_ids ) > 0 ) {
+			$ids_string = implode( ',', $this->excluded_user_ids );
+			if ( ! empty( $this->limit_to_site ) ) {
+				WP_CLI::success( sprintf(
+					'All comments and users except: \'%s\' on site \'%s\' rewritten.',
+					$ids_string,
+					$this->limit_to_site
+				) );
+			} else {
+				WP_CLI::success( sprintf( 'All comments and users except: \'%s\' rewritten.', $ids_string ) );
+			}
+		} else {
+			if ( ! empty( $this->limit_to_site ) ) {
+				WP_CLI::success( sprintf( 'All comments and users on site \'%s\' rewritten.' ) );
+			} else {
+				WP_CLI::success( sprintf( 'All comments and users rewritten.' ) );
+			}
+		}
 	}
 
 	/**
@@ -57,52 +115,97 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 	 * @return integer Number of comments updated.
 	 */
 	protected function obfuscate_comments() {
-		$faker = Factory::create();
+		$faker        = Factory::create();
+		$count        = 0;
+		$all_comments = array();
 
-		$trash_comments   = get_comments( array( 'status' => 'trash' ) );
-		$spam_comments    = get_comments( array( 'status' => 'spam' ) );
-		$regular_comments = get_comments();
-		$comments         = array_merge( $regular_comments, $trash_comments, $spam_comments );
+		if ( ! is_multisite() ) {
+			$data                        = $this->gather_comments( null );
+			$count                       = count( $data );
+			$all_comments['single_site'] = $data;
+		} else {
+			if ( ! empty( $this->limit_to_site ) ) {
+				$site = get_site( $this->limit_to_site );
+				if ( ! empty( $site ) ) {
+					$data                           = $this->gather_comments( $site->blog_id );
+					$count                          = $count + count( $data );
+					$all_comments[ $site->blog_id ] = $data;
+				} else {
+					WP_CLI::error( 'Site not found.' );
+				}
+			} else {
+				$sites = get_sites();
+				foreach ( $sites as $site ) {
+					$data                           = $this->gather_comments( $site->blog_id );
+					$count                          = $count + count( $data );
+					$all_comments[ $site->blog_id ] = $data;
+				}
+			}
+		}
 
-		$count    = count( $comments );
-		$progress = \WP_CLI\Utils\make_progress_bar( 'Obfuscating comments...', $count );
-
-		foreach ( $comments as $comment ) {
-			$commentarr                         = $comment->to_array();
-			$commentarr['comment_author']       = $faker->name;
-			$commentarr['comment_author_email'] = $faker->safeEmail;
-			$commentarr['comment_author_url']   = $faker->url;
-			$commentarr['comment_author_IP']    = $faker->ipv4;
-			$commentarr['comment_agent']        = $faker->userAgent;
-			/**
-			 * Pre-update Comment.
-			 *
-			 * Triggered before a single comment is updated with fake information. Allows you to modify custom meta fields when the plugin is triggered.
-			 *
-			 * @since 1.0.0
-			 *
-			 * @param WP_Comment $comment original WP_Comment object.
-			 * @param array $commentarr new data about to be written to the database.
-			 * @param Factory $faker the faker object, made available for you to generate fake data for meta fields etc.
-			 */
-			do_action( 'gdpr_sanitizer_pre_update_comment', $comment, $commentarr, $faker );
-			wp_update_comment( $commentarr );
-			/**
-			 * Post update comment.
-			 *
-			 * Triggered after a single comment is updated with fake information.
-			 *
-			 * @since 1.0.0
-			 *
-			 * @param WP_Comment $comment original WP_Comment object.
-			 * @param array $commentarr new data about to be written to the database.
-			 * @param Factory $faker the faker object, made available for you to generate fake data for meta fields etc.
-			 */
-			do_action( 'gdpr_sanitizer_post_update_comment', $comment, $commentarr, $faker );
-			$progress->tick();
+		$progress = \WP_CLI\Utils\make_progress_bar( 'Rewriting comments...', $count );
+		foreach ( $all_comments as $blog_id => $comments ) {
+			foreach ( $comments as $comment ) {
+				if ( 'single_site' !== $blog_id ) {
+					switch_to_blog( $blog_id );
+				}
+				$commentarr                         = $comment->to_array();
+				$commentarr['comment_author']       = $faker->name;
+				$commentarr['comment_author_email'] = $faker->safeEmail;
+				$commentarr['comment_author_url']   = $faker->url;
+				$commentarr['comment_author_IP']    = $faker->ipv4;
+				$commentarr['comment_agent']        = $faker->userAgent;
+				/**
+				 * Pre-update Comment.
+				 *
+				 * Triggered before a single comment is updated with fake information. Allows you to modify custom meta fields when the plugin is triggered.
+				 *
+				 * @since 1.0.0
+				 *
+				 * @param WP_Comment $comment original WP_Comment object.
+				 * @param array $commentarr new data about to be written to the database.
+				 * @param Factory $faker the faker object, made available for you to generate fake data for meta fields etc.
+				 */
+				do_action( 'gdpr_sanitizer_pre_update_comment', $comment, $commentarr, $faker );
+				wp_update_comment( $commentarr );
+				/**
+				 * Post update comment.
+				 *
+				 * Triggered after a single comment is updated with fake information.
+				 *
+				 * @since 1.0.0
+				 *
+				 * @param WP_Comment $comment original WP_Comment object.
+				 * @param array $commentarr new data about to be written to the database.
+				 * @param Factory $faker the faker object, made available for you to generate fake data for meta fields etc.
+				 */
+				do_action( 'gdpr_sanitizer_post_update_comment', $comment, $commentarr, $faker );
+				$progress->tick();
+				restore_current_blog();
+			}
 		}
 		$progress->finish();
 		return $count;
+	}
+
+	/**
+	 * Gather comments for a single blog.
+	 *
+	 * @param integer $blog_id blog id.
+	 *
+	 * @return array
+	 */
+	protected function gather_comments( $blog_id ) {
+		if ( is_int( $blog_id ) ) {
+			switch_to_blog( $blog_id );
+		}
+		$trash_comments   = get_comments( array( 'status' => 'trash' ) );
+		$spam_comments    = get_comments( array( 'status' => 'spam' ) );
+		$regular_comments = get_comments();
+
+		restore_current_blog();
+
+		return array_merge( $regular_comments, $trash_comments, $spam_comments );
 	}
 
 	/**
@@ -112,12 +215,16 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 	 */
 	protected function obfuscate_users() {
 		$users = array();
-		if ( is_multisite() ) { // @TODO check global --url param to allow for operating on a single site
-			$site_ids = get_sites();
-			foreach ( $site_ids as $site_id ) {
+		if ( is_multisite() ) {
+			if ( ! empty( $this->limit_to_site ) ) {
+				$sites[] = get_site( $this->limit_to_site );
+			} else {
+				$sites = get_sites();
+			}
+			foreach ( $sites as $site ) {
 				$site_users = get_users(
 					array(
-						'blog_id' => $site_id,
+						'blog_id' => $site->blog_id,
 						'exclude' => $this->excluded_user_ids,
 					)
 				);
@@ -131,17 +238,17 @@ class GDPR_Sanitizer extends \WP_CLI_Command {
 			);
 		}
 		if ( count( $users ) <= 0 ) {
-			WP_CLI::success( 'No users changed (did you exclude them all?)' );
-
-			return;
+			WP_CLI::warning( 'No users changed (did you exclude them all?)' );
+			return 0;
 		}
 		$count    = count( $users );
-		$progress = \WP_CLI\Utils\make_progress_bar( 'Obfuscating users...', $count );
+		$progress = \WP_CLI\Utils\make_progress_bar( 'Rewriting users...', $count );
 		foreach ( $users as $user ) {
 			$this->obfuscate_user( $user );
 			$progress->tick();
 		}
 		$progress->finish();
+
 		return $count;
 	}
 
